@@ -211,11 +211,9 @@ static os_unfair_lock s_stateLock = OS_UNFAIR_LOCK_INIT;
 #pragma mark - Pixel format helpers
 
 - (NSString *)fourCC:(OSType)fmt {
-    char c[5] = {
-        (char)((fmt >> 24) & 0xFF), (char)((fmt >> 16) & 0xFF),
-        (char)((fmt >> 8) & 0xFF), (char)(fmt & 0xFF), 0
-    };
-    return [NSString stringWithCString:c encoding:NSISOLatin1String] ?: @"????";
+    return [NSString stringWithFormat:@"%c%c%c%c",
+            (char)((fmt >> 24) & 0xFF), (char)((fmt >> 16) & 0xFF),
+            (char)((fmt >> 8) & 0xFF), (char)(fmt & 0xFF)];
 }
 
 - (BOOL)isDirectCIPixelFormat:(OSType)fmt {
