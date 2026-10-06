@@ -64,9 +64,9 @@
     if (![url.scheme isEqualToString:@"http"] && ![url.scheme isEqualToString:@"https"]) return;
     if (!url.host.length) return;
 
-    __weak typeof(self) weakSelf = self;
+    __weak __typeof__(self) weakSelf = self;
     void (^block)(CVPixelBufferRef, CMTime) = ^(CVPixelBufferRef b, CMTime pts) {
-        __strong typeof(weakSelf) self = weakSelf;
+        __strong __typeof__(weakSelf) self = weakSelf;
         if (!self) return;
         [self.queue push:b pts:pts];
         self.fpsDecoded++;
