@@ -1,7 +1,11 @@
 # CameraBridge V2 — Theos rootless tweak
 # Target: iPhone 11 / iOS 15.3.1 / TrollStore / TrollFools
+#
+# waruhachi/sdks provides iPhoneOS15.6.sdk (no 15.0), so we build against 15.6
+# while keeping the deployment target at iOS 15.0 for 15.3.1 devices.
 
-TARGET := iphone:clang:latest:15.0
+TARGET := iphone:clang:latest:15.6
+IPHONEOS_DEPLOYMENT_TARGET := 15.0
 ARCHS := arm64 arm64e
 
 # Rootless is the default packaging scheme for TrollStore / TrollFools targets.
