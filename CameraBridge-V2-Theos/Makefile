@@ -15,7 +15,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME := CameraBridgeV2
 
-CameraBridgeV2_FILES := src/main.mm \
+CameraBridgeV2_FILES := src/main.xm \
     src/CBSettings.mm \
     src/CBStreamManager.mm \
     src/CBHTTPFLVSource.mm \
@@ -28,8 +28,8 @@ CameraBridgeV2_FILES := src/main.mm \
 
 CameraBridgeV2_CFLAGS := -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function
 CameraBridgeV2_OBJCFLAGS := -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function
-CameraBridgeV2_OBJCCFLAGS := -std=c++17 -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function
-CameraBridgeV2_CCFLAGS := -std=c++17 -fobjc-arc
+CameraBridgeV2_OBJCCFLAGS := -std=gnu++17 -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function
+CameraBridgeV2_CCFLAGS := -std=gnu++17 -fobjc-arc
 
 CameraBridgeV2_FRAMEWORKS := AVFoundation CoreMedia CoreVideo CoreImage VideoToolbox UIKit QuartzCore Foundation
 CameraBridgeV2_LIBRARIES := c++ bz2 z
