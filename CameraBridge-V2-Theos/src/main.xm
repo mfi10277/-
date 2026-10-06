@@ -47,18 +47,26 @@ static const void *kCBProxyKey = &kCBProxyKey;
 
 %ctor {
     @autoreleasepool {
-        [[CBSettings shared] load];
+        CBSettings *settings = [CBSettings shared]; // load + [CBV2] settings loaded
         NSLog(@"[CBV2] injected");
-        NSLog(@"[CBV2] configured: enabled=%d mirror=%d rotation=%ld aspect=%ld url=%@",
-              [CBSettings shared].enabled,
-              [CBSettings shared].mirror,
-              (long)[CBSettings shared].rotation,
-              (long)[CBSettings shared].aspectMode,
-              [CBSettings shared].streamURL);
+        NSLog(@"[CBV2] configured: enabled=%d autostart=%d mirror=%d rotation=%ld aspect=%ld url=%@",
+              settings.enabled,
+              settings.autoStart,
+              settings.mirror,
+              (long)settings.rotation,
+              (long)settings.aspectMode,
+              settings.streamURL);
+        // AutoStart: AutoStart && Enabled && URL present -> start the network stream.
+        if (settings.autoStart && settings.enabled && settings.streamURL.length > 0) {
+            NSLog(@"[CBV2] autostart = YES");
+            [[CBStreamManager shared] startIfNeeded];
+        } else {
+            NSLog(@"[CBV2] autostart = NO");
+        }
+        // Show the control panel on every launch, independent of StreamURL/Enabled/AutoStart.
+        // CBControlPanel guards against duplicate presentation.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if ([CBSettings shared].streamURL.length == 0) {
-                [[CBControlPanel shared] show];
-            }
+            [[CBControlPanel shared] show];
         });
     }
 }

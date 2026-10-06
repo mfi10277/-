@@ -102,6 +102,18 @@
     NSLog(@"[CBV2] stream stopped");
 }
 
+- (BOOL)isStarted {
+    __block BOOL started = NO;
+    dispatch_sync(_lifecycleLock, ^{ started = _started; });
+    return started;
+}
+
+- (void)restart {
+    [self stop];
+    NSLog(@"[CBV2] stream restart");
+    [self startIfNeeded];
+}
+
 #pragma mark - Frame path
 
 - (CVPixelBufferRef)copyLatestFrameForTarget:(CVPixelBufferRef)target pts:(CMTime *)pts {

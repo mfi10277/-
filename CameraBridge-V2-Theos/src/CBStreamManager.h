@@ -6,5 +6,7 @@
 + (instancetype)shared;
 - (void)startIfNeeded;
 - (void)stop;
+- (void)restart;
+- (BOOL)isStarted;
 - (CVPixelBufferRef)copyLatestFrameForTarget:(CVPixelBufferRef)target pts:(CMTime *)pts;
 @end
