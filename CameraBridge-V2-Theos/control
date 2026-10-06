@@ -1,0 +1,9 @@
+Package: com.camerabridge.v2
+Name: CameraBridge V2
+Depends: firmware (>= 15.0), mobilesubstrate
+Architecture: iphoneos-arm64
+Description: Standalone virtual camera video replacement tweak for user-owned app testing.
+Maintainer: CameraBridge Project
+Author: CameraBridge Project
+Section: Tweaks
+Version: 2.0.0
