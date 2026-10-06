@@ -52,7 +52,7 @@ static void CBDecodeCallback(void *decompressionOutputRefCon,
 - (BOOL)createSessionIfPossible {
     if (!_sps || !_pps) return NO;
     NSUInteger nls = MAX(1u, MIN(_nalLengthSize, 4u));
-    const uint8_t *ps[2] = {_sps.bytes, _pps.bytes};
+    const uint8_t *ps[2] = {(const uint8_t *)_sps.bytes, (const uint8_t *)_pps.bytes};
     size_t sizes[2] = {_sps.length, _pps.length};
 
     CMVideoFormatDescriptionRef fmt = NULL;
@@ -98,7 +98,7 @@ static BOOL CBAnnexBStartCodeLen(const uint8_t *p, NSUInteger len, NSUInteger *c
 - (BOOL)pushNALU:(NSData *)nalu pts:(CMTime)pts isKeyFrame:(BOOL)keyFrame {
     if (!nalu.length) return NO;
 
-    const uint8_t *bytes = nalu.bytes;
+    const uint8_t *bytes = (const uint8_t *)nalu.bytes;
     NSUInteger len = nalu.length;
     NSUInteger sc = 0;
     if (CBAnnexBStartCodeLen(bytes, len, &sc)) {

@@ -271,7 +271,7 @@ static inline int32_t CBReadS24BE(const uint8_t *p) {
 #pragma mark - FLV parser (state machine)
 
 - (void)parseAvailableFLV {
-    const uint8_t *bytes = _buffer.bytes;
+    const uint8_t *bytes = (const uint8_t *)_buffer.bytes;
     NSUInteger len = _buffer.length;
     BOOL progress = YES;
     while (progress) {
