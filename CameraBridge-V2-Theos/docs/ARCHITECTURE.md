@@ -1,33 +1,22 @@
-# V2 architecture
+# Architecture
 
 ```text
-TikTok
-  |
-  +-- AVCaptureVideoDataOutput
-          |
-          +-- CBCameraProxy
-                 |
-                 +-- CBStreamManager
-                        |
-                        +-- M3U8 -> CBHLSSource -> AVPlayer -> PixelBuffer
-                        |
-                        +-- FLV  -> CBHTTPFLVSource -> FLV parser -> H264Decoder
-                 |
-                 +-- CBFrameQueue
-                 |
-                 +-- CBCreateSampleBufferLike
-                 |
-                 +-- original camera delegate
+URL
+ ├─ .m3u8 -> AVPlayer -> AVPlayerItemVideoOutput -> CVPixelBuffer
+ └─ .flv  -> NSURLSession -> FLV parser -> AVC NALUs -> VideoToolbox -> CVPixelBuffer
+                                              |
+                                              v
+                                       CBFrameQueue
+                                              |
+AVCaptureVideoDataOutput -> CBCameraProxy -> CBStreamManager
+                                              |
+                                    Core Image render
+                                              |
+                                     CMSampleBuffer
+                                              |
+                                         app delegate
 ```
 
-## Iteration order
+The bridge deliberately keeps transport parsing separate from the camera hook. This makes it possible to replace the FLV parser or add another decoder without changing delegate interposition.
 
-1. Confirm injection.
-2. Confirm AVCaptureVideoDataOutput delegate hook.
-3. Confirm M3U8 frame acquisition.
-4. Confirm target pixel format.
-5. Confirm replacement sample reaches the original delegate.
-6. Implement complete FLV AVC parsing.
-7. Add crop/fit/fill/rotation.
-8. Add frame pacing/reconnect.
-9. Only after video is stable, add audio.
+The current runtime hook is `%hook AVCaptureVideoDataOutput -setSampleBufferDelegate:queue:`. Compatibility with private camera graphs should be added only after logs identify the concrete output node used by the target version.
