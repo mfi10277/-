@@ -33,7 +33,7 @@ CameraBridge-V2-Theos/
 ├── docs/
 │   └── ARCHITECTURE.md
 ├── src/
-│   ├── main.mm
+│   ├── main.xm
 │   ├── CBSettings.h / CBSettings.mm
 │   ├── CBFrameQueue.h / CBFrameQueue.mm
 │   ├── CBH264Decoder.h / CBH264Decoder.mm
