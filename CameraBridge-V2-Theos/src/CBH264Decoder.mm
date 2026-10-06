@@ -8,9 +8,26 @@
 @property(nonatomic) CMTime latestPTS;
 @property(nonatomic) NSData *sps;
 @property(nonatomic) NSData *pps;
+@property(nonatomic) uint32_t pendingCount;   // frames submitted, not yet decoded
+@property(nonatomic) uint32_t decodedCount;
+@property(nonatomic) uint32_t droppedCount;
 @end
 
 @implementation CBH264Decoder
+
+- (instancetype)init {
+    if ((self = [super init])) {
+        _nalLengthSize = 4;
+        _latestPTS = kCMTimeInvalid;
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [self reset];
+}
+
+#pragma mark - VT callback
 
 static void CBDecodeCallback(void *decompressionOutputRefCon,
                              void *sourceFrameRefCon,
@@ -25,58 +42,129 @@ static void CBDecodeCallback(void *decompressionOutputRefCon,
         if (self.latest) CVPixelBufferRelease(self.latest);
         self.latest = (CVPixelBufferRef)CFRetain(imageBuffer);
         self.latestPTS = presentationTimeStamp;
+        if (self.pendingCount > 0) self.pendingCount--;
+        self.decodedCount++;
     }
 }
 
-- (void)dealloc { [self reset]; }
+#pragma mark - Session lifecycle
 
 - (BOOL)createSessionIfPossible {
     if (!_sps || !_pps) return NO;
+    NSUInteger nls = MAX(1u, MIN(_nalLengthSize, 4u));
     const uint8_t *ps[2] = {_sps.bytes, _pps.bytes};
     size_t sizes[2] = {_sps.length, _pps.length};
-    if (_format) CFRelease(_format);
-    OSStatus st = CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, 2, ps, sizes, 4, &_format);
-    if (st != noErr) return NO;
 
-    if (_session) { VTDecompressionSessionInvalidate(_session); CFRelease(_session); _session = NULL; }
+    CMVideoFormatDescriptionRef fmt = NULL;
+    OSStatus st = CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault,
+                                                                      2, ps, sizes, (int)nls, &fmt);
+    if (st != noErr) {
+        NSLog(@"[CBV2] error: CMVideoFormatDescriptionCreateFromH264ParameterSets failed: %d", (int)st);
+        return NO;
+    }
+    if (_session) {
+        VTDecompressionSessionInvalidate(_session);
+        CFRelease(_session);
+        _session = NULL;
+    }
+    if (_format) CFRelease(_format);
+    _format = fmt;
+
     NSDictionary *attrs = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-        (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
+        (id)kCVPixelBufferMetalCompatibilityKey: @YES,
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
     };
     VTDecompressionOutputCallbackRecord cb = { CBDecodeCallback, (__bridge void *)self };
-    st = VTDecompressionSessionCreate(kCFAllocatorDefault, _format, NULL, (__bridge CFDictionaryRef)attrs, &cb, &_session);
-    return st == noErr;
+    st = VTDecompressionSessionCreate(kCFAllocatorDefault, _format, NULL,
+                                      (__bridge CFDictionaryRef)attrs, &cb, &_session);
+    if (st != noErr) {
+        NSLog(@"[CBV2] error: VTDecompressionSessionCreate failed: %d", (int)st);
+        return NO;
+    }
+    _pendingCount = 0;
+    NSLog(@"[CBV2] H264 decoder ready (nalLengthSize=%lu)", (unsigned long)nls);
+    return YES;
+}
+
+#pragma mark - NALU handling
+
+static BOOL CBAnnexBStartCodeLen(const uint8_t *p, NSUInteger len, NSUInteger *consumed) {
+    if (len >= 4 && p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 1) { *consumed = 4; return YES; }
+    if (len >= 3 && p[0] == 0 && p[1] == 0 && p[2] == 1) { *consumed = 3; return YES; }
+    return NO;
 }
 
 - (BOOL)pushNALU:(NSData *)nalu pts:(CMTime)pts isKeyFrame:(BOOL)keyFrame {
     if (!nalu.length) return NO;
-    const uint8_t *p = nalu.bytes;
-    uint8_t type = p[0] & 0x1F;
-    if (type == 7) { self.sps = nalu; [self createSessionIfPossible]; return YES; }
-    if (type == 8) { self.pps = nalu; [self createSessionIfPossible]; return YES; }
+
+    const uint8_t *bytes = nalu.bytes;
+    NSUInteger len = nalu.length;
+    NSUInteger sc = 0;
+    if (CBAnnexBStartCodeLen(bytes, len, &sc)) {
+        bytes += sc;
+        len -= sc;
+    }
+    if (len < 1) return NO;
+
+    uint8_t type = bytes[0] & 0x1F;
+    NSData *unit = [NSData dataWithBytes:bytes length:len];
+
+    // SPS / PPS — (re)build the decoder session when both are present.
+    if (type == 7) { self.sps = unit; [self createSessionIfPossible]; return YES; }
+    if (type == 8) { self.pps = unit; [self createSessionIfPossible]; return YES; }
+    // Non-VCL units (SEI/AUD/...): not needed for decode, not an error.
+    if (type >= 6) return YES;
+
     if (!_session) return NO;
 
-    NSMutableData *avcc = [NSMutableData dataWithLength:4 + nalu.length];
-    uint32_t len = (uint32_t)CFSwapInt32HostToBig((uint32_t)nalu.length);
-    memcpy(avcc.mutableBytes, &len, 4);
-    memcpy((uint8_t *)avcc.mutableBytes + 4, nalu.bytes, nalu.length);
+    @synchronized (self) {
+        if (_pendingCount >= 12) { _droppedCount++; return YES; } // decoder too far behind
+        _pendingCount++;
+    }
 
+    // Frame NALU as AVCC: length field (nalLengthSize bytes) + NALU.
+    NSUInteger nls = MAX(1u, MIN(_nalLengthSize, 4u));
+    NSMutableData *avcc = [NSMutableData dataWithLength:nls + len];
+    uint8_t *dst = (uint8_t *)avcc.mutableBytes;
+    uint32_t be = (uint32_t)len;
+    for (NSUInteger i = 0; i < nls; i++) {
+        dst[nls - 1 - i] = be & 0xFF;
+        be >>= 8;
+    }
+    memcpy(dst + nls, bytes, len);
+
+    // Owned block buffer: allocator copies the payload so the async decode never
+    // touches freed stack/heap memory after we return.
     CMBlockBufferRef bb = NULL;
-    CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, avcc.mutableBytes, avcc.length,
-                                       kCFAllocatorNull, NULL, 0, avcc.length, 0, &bb);
+    OSStatus st = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, avcc.length,
+                                                     kCFAllocatorDefault, NULL, 0, 0, 0, &bb);
+    if (st != kCMBlockBufferNoErr) { @synchronized (self) { _pendingCount--; } return NO; }
+    st = CMBlockBufferReplaceDataBytes(avcc.bytes, bb, 0, avcc.length);
+    if (st != kCMBlockBufferNoErr) {
+        CFRelease(bb);
+        @synchronized (self) { _pendingCount--; }
+        return NO;
+    }
+
     CMSampleBufferRef sb = NULL;
     CMTime dur = CMTimeMake(1, 30);
-    if (bb && _format) {
-        CMSampleTimingInfo ti = {dur, pts, kCMTimeInvalid};
+    CMVideoFormatDescriptionRef f = _format;
+    if (bb && f) {
+        CMSampleTimingInfo ti = { dur, pts, kCMTimeInvalid };
         size_t size = avcc.length;
-        CMSampleBufferCreateReady(kCFAllocatorDefault, bb, _format, 1, 1, &ti, 1, &size, &sb);
+        CMSampleBufferCreateReady(kCFAllocatorDefault, bb, f, 1, 1, &ti, 1, &size, &sb);
     }
-    if (bb) CFRelease(bb);
-    if (!sb) return NO;
+    CFRelease(bb);
+    if (!sb) { @synchronized (self) { _pendingCount--; } return NO; }
+
     VTDecodeFrameFlags flags = kVTDecodeFrame_EnableAsynchronousDecompression;
-    OSStatus st = VTDecompressionSessionDecodeFrame(_session, sb, flags, NULL, NULL);
+    st = VTDecompressionSessionDecodeFrame(_session, sb, flags, NULL, NULL);
     CFRelease(sb);
-    return st == noErr || st == kVTVideoDecoderBadDataErr;
+    if (st == noErr) return YES;                 // async callback will decrement pendingCount
+    @synchronized (self) { _pendingCount--; }    // failed/bad-data frames never call back
+    if (st == kVTVideoDecoderBadDataErr) return YES;
+    return NO;
 }
 
 - (CVPixelBufferRef)copyLatestFrameWithPTS:(CMTime *)pts {
@@ -88,12 +176,20 @@ static void CBDecodeCallback(void *decompressionOutputRefCon,
     }
 }
 
+- (BOOL)isReady {
+    return _session != NULL;
+}
+
 - (void)reset {
     @synchronized (self) {
         if (_session) { VTDecompressionSessionInvalidate(_session); CFRelease(_session); _session = NULL; }
         if (_format) { CFRelease(_format); _format = NULL; }
         if (_latest) { CVPixelBufferRelease(_latest); _latest = NULL; }
-        _sps = nil; _pps = nil;
+        _sps = nil;
+        _pps = nil;
+        _pendingCount = 0;
+        _latestPTS = kCMTimeInvalid;
     }
 }
+
 @end
