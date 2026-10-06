@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 
 @interface CBFrameQueue : NSObject
