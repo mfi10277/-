@@ -44,9 +44,12 @@ jobs:
           set -euxo pipefail
           mkdir -p artifacts
           cp packages/*.deb artifacts/ 2>/dev/null || true
-          for f in $(find .theos -name 'CameraBridgeV2.dylib'); do
+          # Only the stripped per-arch dylibs from .theos/obj/<arch>/ are release artifacts.
+          for f in $(find .theos/obj -name 'CameraBridgeV2.dylib'); do
             arch=$(basename "$(dirname "$f")")
-            cp "$f" "artifacts/CameraBridgeV2_${arch}.dylib"
+            case "$arch" in
+              arm64|arm64e) cp "$f" "artifacts/CameraBridgeV2_${arch}.dylib" ;;
+            esac
           done
           ls -lah artifacts
 
