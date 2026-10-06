@@ -4,7 +4,7 @@
 #import "CBSampleBufferFactory.h"
 
 @interface CBCameraProxy ()
-@property(nonatomic, weak) id original;
+@property(nonatomic, strong) id original;
 @property(nonatomic) dispatch_queue_t originalQueue;
 @end
 
@@ -23,7 +23,6 @@
         if (repl) {
             CMSampleBufferRef s=CBCreateSampleBufferLike(sampleBuffer,repl);
             if (s) send=s;
-            else send=sampleBuffer;
         }
     }
     id target=_original;
