@@ -1,0 +1,57 @@
+name: Build CameraBridge V2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'CameraBridge-V2-Theos/**'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: CameraBridge-V2-Theos
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: waruhachi/theos-action@v2.6.3
+        with:
+          theos-src: waruhachi/theos
+          theos-branch: main
+          sdks-src: waruhachi/sdks
+          sdks-branch: master
+
+      - name: Show toolchain
+        run: |
+          echo "THEOS=$THEOS"
+          ls -1 "$THEOS/sdks" 2>/dev/null || true
+
+      - name: Build rootless package
+        run: |
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Collect artifacts (.deb + .dylib)
+        run: |
+          set -euxo pipefail
+          mkdir -p artifacts
+          cp packages/*.deb artifacts/ 2>/dev/null || true
+          for f in $(find .theos -name 'CameraBridgeV2.dylib'); do
+            arch=$(basename "$(dirname "$f")")
+            cp "$f" "artifacts/CameraBridgeV2_${arch}.dylib"
+          done
+          ls -lah artifacts
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CameraBridgeV2
+          path: CameraBridge-V2-Theos/artifacts/
