@@ -50,8 +50,6 @@ static void CBDecodeCallback(void *decompressionOutputRefCon,
 
 - (BOOL)pushNALU:(NSData *)nalu pts:(CMTime)pts isKeyFrame:(BOOL)keyFrame {
     if (!nalu.length) return NO;
-
-    // Expected input: one raw H.264 NAL unit, without Annex-B start code.
     const uint8_t *p = nalu.bytes;
     uint8_t type = p[0] & 0x1F;
     if (type == 7) { self.sps = nalu; [self createSessionIfPossible]; return YES; }
@@ -68,10 +66,10 @@ static void CBDecodeCallback(void *decompressionOutputRefCon,
                                        kCFAllocatorNull, NULL, 0, avcc.length, 0, &bb);
     CMSampleBufferRef sb = NULL;
     CMTime dur = CMTimeMake(1, 30);
-    if (bb && CMVideoFormatDescriptionRef f = _format) {
+    if (bb && _format) {
         CMSampleTimingInfo ti = {dur, pts, kCMTimeInvalid};
         size_t size = avcc.length;
-        CMSampleBufferCreateReady(kCFAllocatorDefault, bb, f, 1, 1, &ti, 1, &size, &sb);
+        CMSampleBufferCreateReady(kCFAllocatorDefault, bb, _format, 1, 1, &ti, 1, &size, &sb);
     }
     if (bb) CFRelease(bb);
     if (!sb) return NO;
@@ -89,6 +87,7 @@ static void CBDecodeCallback(void *decompressionOutputRefCon,
         return b;
     }
 }
+
 - (void)reset {
     @synchronized (self) {
         if (_session) { VTDecompressionSessionInvalidate(_session); CFRelease(_session); _session = NULL; }
