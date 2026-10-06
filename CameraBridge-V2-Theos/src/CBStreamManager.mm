@@ -4,7 +4,6 @@
 #import "CBHLSSource.h"
 #import "CBHTTPFLVSource.h"
 #import <CoreImage/CoreImage.h>
-#import <VideoToolbox/VideoToolbox.h>
 #import <os/lock.h>
 
 @interface CBStreamManager ()
@@ -178,7 +177,7 @@ static os_unfair_lock s_stateLock = OS_UNFAIR_LOCK_INIT;
         // Primary path: Core Image renders directly into the target format
         // (32BGRA / 420v / 420f / bi-planar video-range). CI render:toCVPixelBuffer:
         // has no OSStatus to check, so the whitelist above is the success gate and
-        // any format outside it falls through to the transfer-session path below.
+        // any format outside it falls through to the fallback below.
         out = [self createBuffer:w h:h fmt:tgtFmt];
         if (out) {
             CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
@@ -187,10 +186,17 @@ static os_unfair_lock s_stateLock = OS_UNFAIR_LOCK_INIT;
         }
     }
     if (!out) {
-        // Compatibility path: CI -> BGRA intermediate -> VTPixelTransferSession -> target fmt.
-        NSLog(@"[CBV2] pixel path: CI->BGRA + VTPixelTransferSession target=%s",
+        // Compatibility path (iOS 15: VTPixelTransferSession is iOS 16+, so CI
+        // renders to the most common camera format 420f instead of failing on an
+        // exotic target format).
+        NSLog(@"[CBV2] pixel path: CI fallback to 420f (target=%s unsupported)",
               [self fourCC:tgtFmt].UTF8String);
-        out = [self renderViaTransferSession:image w:w h:h targetFmt:tgtFmt];
+        out = [self createBuffer:w h:h fmt:kCVPixelFormatType_420YpCbCr8BiPlanarFullRange];
+        if (out) {
+            CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+            [self.ci render:image toCVPixelBuffer:out bounds:CGRectMake(0, 0, w, h) colorSpace:cs];
+            CGColorSpaceRelease(cs);
+        }
     }
     if (!out) return NULL;
 
@@ -238,36 +244,6 @@ static os_unfair_lock s_stateLock = OS_UNFAIR_LOCK_INIT;
         NSLog(@"[CBV2] error: CVPixelBufferCreate failed status=%d", (int)st);
         return NULL;
     }
-    return out;
-}
-
-- (CVPixelBufferRef)renderViaTransferSession:(CIImage *)image w:(size_t)w h:(size_t)h targetFmt:(OSType)tgtFmt {
-    CVPixelBufferRef bgra = [self createBuffer:w h:h fmt:kCVPixelFormatType_32BGRA];
-    if (!bgra) return NULL;
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    [self.ci render:image toCVPixelBuffer:bgra bounds:CGRectMake(0, 0, w, h) colorSpace:cs];
-    CGColorSpaceRelease(cs);
-
-    CVPixelBufferRef out = [self createBuffer:w h:h fmt:tgtFmt];
-    if (!out) { CVPixelBufferRelease(bgra); return NULL; }
-
-    VTPixelTransferSessionRef t = NULL;
-    OSStatus st = VTPixelTransferSessionCreate(kCFAllocatorDefault, &t);
-    if (st == noErr && t) {
-        st = VTPixelTransferSessionTransferImage(t, bgra, out);
-        if (st != noErr) {
-            NSLog(@"[CBV2] error: VTPixelTransferSessionTransferImage failed status=%d", (int)st);
-            CVPixelBufferRelease(out);
-            out = NULL;
-        }
-        VTPixelTransferSessionInvalidate(t);
-        CFRelease(t);
-    } else {
-        NSLog(@"[CBV2] error: VTPixelTransferSessionCreate failed status=%d", (int)st);
-        CVPixelBufferRelease(out);
-        out = NULL;
-    }
-    CVPixelBufferRelease(bgra);
     return out;
 }
 
