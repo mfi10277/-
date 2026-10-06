@@ -1,64 +1,111 @@
 # CameraBridge V2
 
-Standalone iOS video-source replacement tweak for testing on a user-owned app.
+Theos rootless iOS tweak that replaces an app's `AVCaptureVideoDataOutput` camera frames with frames decoded from a user-supplied network stream (HTTP-FLV or M3U8/HLS).
 
-## Target
+Target environment: **iPhone 11 / iOS 15.3.1 / TrollStore / TrollFools**, injected into **TikTok v47.0.0 (`com.zhiliaoapp.musically`)**.
 
-- iPhone 11
-- iOS 15.3.1
-- TrollStore + TrollFools
-- Intended first target: TikTok 47.0.0
+## Pipeline
 
-## Important
+```text
+HTTP-FLV:  HTTP -> FLV parser -> AVC SPS/PPS -> H.264 NALUs -> VideoToolbox -> CVPixelBuffer
+HLS:       M3U8 -> AVPlayer -> AVPlayerItemVideoOutput -> CVPixelBuffer
+                                                          |
+                                                          v
+                                                    CBFrameQueue (latest, bounded 3)
+                                                          |
+AVCaptureVideoDataOutput -> CBCameraProxy -> CBStreamManager
+                                                          |
+                                               Core Image render
+                                              (Fill/Fit/Stretch + Mirror + Rotation)
+                                                          |
+                                                     CMSampleBuffer
+                                                          |
+                                                   original delegate
+```
 
-V2 deliberately does **not** reproduce the original plugin's license/card-key system.
-It is an independent implementation.
+## Repository layout
 
-## Current source paths
-
-1. M3U8 -> AVPlayerItemVideoOutput -> CVPixelBuffer
-2. HTTP-FLV -> isolated parser scaffold -> H264 VideoToolbox decoder
-3. Frame queue
-4. Pixel-buffer conversion
-5. AVCaptureVideoDataOutput delegate proxy
-6. CMSampleBuffer replacement
-7. Simple URL input UI
-
-### HTTP-FLV status
-
-The FLV transport class is intentionally isolated. The supplied Douyin test URL is HTTP-FLV, not M3U8.
-The parser scaffold validates the FLV header but does not yet implement complete FLV AVC tag parsing.
-Therefore **M3U8 is the first end-to-end path in this ZIP**; HTTP-FLV is the next parser task.
+```text
+CameraBridge-V2-Theos/
+├── Makefile
+├── control
+├── README.md
+├── docs/
+│   └── ARCHITECTURE.md
+├── src/
+│   ├── main.mm
+│   ├── CBSettings.h / CBSettings.mm
+│   ├── CBFrameQueue.h / CBFrameQueue.mm
+│   ├── CBH264Decoder.h / CBH264Decoder.mm
+│   ├── CBHTTPFLVSource.h / CBHTTPFLVSource.mm
+│   ├── CBHLSSource.h / CBHLSSource.mm
+│   ├── CBStreamManager.h / CBStreamManager.mm
+│   ├── CBCameraProxy.h / CBCameraProxy.mm
+│   ├── CBSampleBufferFactory.h / CBSampleBufferFactory.mm
+│   └── CBControlPanel.h / CBControlPanel.mm
+├── layout/
+│   └── Library/MobileSubstrate/DynamicLibraries/CameraBridgeV2.plist
+└── .github/workflows/build.yml
+```
 
 ## Build
 
-### GitHub Actions
+### GitHub Actions (recommended)
 
-Push the project to GitHub and run:
-Actions -> Build CameraBridge V2.
+Push to `main` or run the `Build CameraBridge V2` workflow manually (`workflow_dispatch`). The runner:
 
-The workflow produces:
-- CameraBridgeV2 rootless .deb
-- source archive
+1. sets up Theos + iOS SDK on `macos-latest`
+2. `make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless`
+3. uploads `artifacts/` containing `.deb` and per-arch `.dylib` files
 
-### Local
-
-On a macOS/Theos environment:
+### Local (macOS with Theos)
 
 ```sh
-export THEOS=~/theos
-make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+make clean
+make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+# artifacts:
+#   packages/*.deb
+#   .theos/obj/arm64/CameraBridgeV2.dylib  (or .theos/obj/debug/arm64/...)
+#   .theos/obj/arm64e/CameraBridgeV2.dylib
 ```
 
-## TrollFools
+Windows cannot build iOS binaries — use the GitHub Action or a macOS machine.
 
-Inject the built tweak/dylib into the target app using your normal TrollFools workflow.
-If the app crashes, remove the injection and inspect device logs before changing hooks.
+## Install on device (TrollFools)
 
-## First test
+1. Build or download `CameraBridgeV2.dylib` (arm64 for iPhone 11).
+2. Open **TrollFools**, select **TikTok** (`com.zhiliaoapp.musically`), inject the dylib.
+3. Relaunch TikTok. After 2 s, if no URL is configured, the CameraBridge panel appears.
+4. Enter your stream URL (`https://host/live.m3u8` or `http://host/live.flv`), tap **启用**.
 
-Use an M3U8 URL first. Then check logs:
+Controls available from the panel:
 
-[CBV2] injected
-[CBV2] camera delegate hooked
-[CBV2] stream started
+| Control | Behavior |
+|---|---|
+| 启用 / 停用 | start / stop replacement; 停用 restores the real camera feed |
+| 镜像 | toggle horizontal mirror |
+| 旋转 | 0 / 90 / 180 / 270 |
+| 比例 | Fill (crop) / Fit (letterbox) / Stretch |
+
+Settings are persisted via `NSUserDefaults`:
+
+- `CBV2.StreamURL`
+- `CBV2.Enabled`
+- `CBV2.Mirror`
+- `CBV2.Rotation`
+- `CBV2.AspectMode` (0=Fill, 1=Fit, 2=Stretch)
+
+## Stream notes
+
+- HTTP-FLV supports AVC/H.264 video tags; audio tags are safely skipped (v1).
+- Parser is state-machine based: a tag may span many network chunks; incomplete tags wait for more data; parsed bytes are compacted out.
+- On disconnect / bad HTTP status the source reconnects with exponential backoff (2 s → 15 s cap).
+- Plain `http://` may be blocked by the host app's ATS; prefer HTTPS when possible.
+
+## Compatibility & diagnostics
+
+Only the public `AVCaptureVideoDataOutput` delegate path is hooked. If the target app does not use that path, enable the built-in diagnostics (`[CBV2] AVCaptureSession startRunning`, `[CBV2] AVCaptureVideoDataOutput created`) and trace the real capture node before adding any compatibility layer. Do not guess private class names.
+
+## License / scope
+
+Independent implementation. No third-party plugin code, keys, or license bypasses are used.
