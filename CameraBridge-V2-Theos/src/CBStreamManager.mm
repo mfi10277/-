@@ -4,6 +4,7 @@
 #import "CBHLSSource.h"
 #import "CBHTTPFLVSource.h"
 #import <CoreImage/CoreImage.h>
+#import <VideoToolbox/VideoToolbox.h>
 #import <os/lock.h>
 
 @interface CBStreamManager ()
@@ -22,11 +23,31 @@
 @property(nonatomic) NSDate *fpsWindowStart;
 @property(nonatomic) NSUInteger fpsDecoded;
 @property(nonatomic) NSUInteger fpsInjected;
+@property(nonatomic) NSDate *pixelLogStart;
 @end
 
 @implementation CBStreamManager {
     os_unfair_lock _cacheLock;
 }
+
+// --- CBV2.SourceState (thread-safe diagnostic state) -------------------------
+static NSString *CBV2SourceState = @"NO_URL";
+static os_unfair_lock s_stateLock = OS_UNFAIR_LOCK_INIT;
+
++ (void)updateSourceState:(NSString *)state {
+    if (!state.length) return;
+    os_unfair_lock_lock(&s_stateLock);
+    CBV2SourceState = [state copy];
+    os_unfair_lock_unlock(&s_stateLock);
+}
+
++ (NSString *)sourceState {
+    os_unfair_lock_lock(&s_stateLock);
+    NSString *r = [CBV2SourceState copy];
+    os_unfair_lock_unlock(&s_stateLock);
+    return r;
+}
+// ----------------------------------------------------------------------------
 
 + (instancetype)shared {
     static CBStreamManager *s;
@@ -56,13 +77,18 @@
     if (!shouldStart) return;
 
     CBSettings *s = [CBSettings shared];
-    if (!s.enabled) return;
+    if (!s.enabled) { [CBStreamManager updateSourceState:@"NO_URL"]; return; }
     NSString *u = s.streamURL;
-    if (!u.length) return;
+    if (!u.length) { [CBStreamManager updateSourceState:@"NO_URL"]; return; }
     NSURL *url = [NSURL URLWithString:u];
-    if (!url) return;
-    if (![url.scheme isEqualToString:@"http"] && ![url.scheme isEqualToString:@"https"]) return;
-    if (!url.host.length) return;
+    if (!url) { [CBStreamManager updateSourceState:@"NO_URL"]; return; }
+    if (![url.scheme isEqualToString:@"http"] && ![url.scheme isEqualToString:@"https"]) {
+        [CBStreamManager updateSourceState:@"NO_URL"];
+        return;
+    }
+    if (!url.host.length) { [CBStreamManager updateSourceState:@"NO_URL"]; return; }
+
+    [CBStreamManager updateSourceState:@"CONNECTING"];
 
     __weak __typeof__(self) weakSelf = self;
     void (^block)(CVPixelBufferRef, CMTime) = ^(CVPixelBufferRef b, CMTime pts) {
@@ -139,34 +165,119 @@
 
     size_t w = CVPixelBufferGetWidth(target);
     size_t h = CVPixelBufferGetHeight(target);
-    OSType fmt = CVPixelBufferGetPixelFormatType(target);
+    OSType tgtFmt = CVPixelBufferGetPixelFormatType(target);
+    OSType srcFmt = CVPixelBufferGetPixelFormatType(src);
+    [self logPixelFormatsIfDue:srcFmt target:tgtFmt];   // e.g. [CBV2] source=420v target=420f
+
+    CIImage *image = [self imageForBuffer:src targetSize:CGSizeMake(w, h)];
+    CVPixelBufferRelease(src);
+    if (!image) return NULL;
 
     CVPixelBufferRef out = NULL;
+    if ([self isDirectCIPixelFormat:tgtFmt]) {
+        // Primary path: Core Image renders directly into the target format
+        // (32BGRA / 420v / 420f / bi-planar video-range). CI render:toCVPixelBuffer:
+        // has no OSStatus to check, so the whitelist above is the success gate and
+        // any format outside it falls through to the transfer-session path below.
+        out = [self createBuffer:w h:h fmt:tgtFmt];
+        if (out) {
+            CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+            [self.ci render:image toCVPixelBuffer:out bounds:CGRectMake(0, 0, w, h) colorSpace:cs];
+            CGColorSpaceRelease(cs);
+        }
+    }
+    if (!out) {
+        // Compatibility path: CI -> BGRA intermediate -> VTPixelTransferSession -> target fmt.
+        NSLog(@"[CBV2] pixel path: CI->BGRA + VTPixelTransferSession target=%s",
+              [self fourCC:tgtFmt].UTF8String);
+        out = [self renderViaTransferSession:image w:w h:h targetFmt:tgtFmt];
+    }
+    if (!out) return NULL;
+
+    [self replaceCached:out pts:srcPTS];
+    _fpsInjected++;
+    [CBStreamManager updateSourceState:@"FRAME_READY"];
+    if (pts) *pts = srcPTS;
+    [self logFPSIfDue];
+    return out;
+}
+
+#pragma mark - Pixel format helpers
+
+- (NSString *)fourCC:(OSType)fmt {
+    char c[5] = {
+        (char)((fmt >> 24) & 0xFF), (char)((fmt >> 16) & 0xFF),
+        (char)((fmt >> 8) & 0xFF), (char)(fmt & 0xFF), 0
+    };
+    return [NSString stringWithCString:c encoding:NSISOLatin1String] ?: @"????";
+}
+
+- (BOOL)isDirectCIPixelFormat:(OSType)fmt {
+    switch (fmt) {
+        case kCVPixelFormatType_32BGRA:
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:  // 420v
+        case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:   // 420f
+        case kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange:
+        case kCVPixelFormatType_422YpCbCr8BiPlanarFullRange:
+        case kCVPixelFormatType_4444YpCbCrA8:
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+- (CVPixelBufferRef)createBuffer:(size_t)w h:(size_t)h fmt:(OSType)fmt {
     NSDictionary *attrs = @{
         (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
         (id)kCVPixelBufferMetalCompatibilityKey: @YES,
     };
-    if (CVPixelBufferCreate(kCFAllocatorDefault, w, h, fmt, (__bridge CFDictionaryRef)attrs, &out) != kCVReturnSuccess) {
-        CVPixelBufferRelease(src);
+    CVPixelBufferRef out = NULL;
+    OSStatus st = CVPixelBufferCreate(kCFAllocatorDefault, w, h, fmt,
+                                      (__bridge CFDictionaryRef)attrs, &out);
+    if (st != kCVReturnSuccess) {
+        NSLog(@"[CBV2] error: CVPixelBufferCreate failed status=%d", (int)st);
         return NULL;
     }
-
-    CIImage *image = [self imageForBuffer:src targetSize:CGSizeMake(w, h)];
-    if (!image) {
-        CVPixelBufferRelease(out);
-        CVPixelBufferRelease(src);
-        return NULL;
-    }
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    [self.ci render:image toCVPixelBuffer:out bounds:CGRectMake(0, 0, w, h) colorSpace:cs];
-    CGColorSpaceRelease(cs);
-    CVPixelBufferRelease(src);
-
-    [self replaceCached:out pts:srcPTS];
-    _fpsInjected++;
-    if (pts) *pts = srcPTS;
-    [self logFPSIfDue];
     return out;
+}
+
+- (CVPixelBufferRef)renderViaTransferSession:(CIImage *)image w:(size_t)w h:(size_t)h targetFmt:(OSType)tgtFmt {
+    CVPixelBufferRef bgra = [self createBuffer:w h:h fmt:kCVPixelFormatType_32BGRA];
+    if (!bgra) return NULL;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    [self.ci render:image toCVPixelBuffer:bgra bounds:CGRectMake(0, 0, w, h) colorSpace:cs];
+    CGColorSpaceRelease(cs);
+
+    CVPixelBufferRef out = [self createBuffer:w h:h fmt:tgtFmt];
+    if (!out) { CVPixelBufferRelease(bgra); return NULL; }
+
+    VTPixelTransferSessionRef t = NULL;
+    OSStatus st = VTPixelTransferSessionCreate(kCFAllocatorDefault, &t);
+    if (st == noErr && t) {
+        st = VTPixelTransferSessionTransferImage(t, bgra, out);
+        if (st != noErr) {
+            NSLog(@"[CBV2] error: VTPixelTransferSessionTransferImage failed status=%d", (int)st);
+            CVPixelBufferRelease(out);
+            out = NULL;
+        }
+        VTPixelTransferSessionInvalidate(t);
+        CFRelease(t);
+    } else {
+        NSLog(@"[CBV2] error: VTPixelTransferSessionCreate failed status=%d", (int)st);
+        CVPixelBufferRelease(out);
+        out = NULL;
+    }
+    CVPixelBufferRelease(bgra);
+    return out;
+}
+
+- (void)logPixelFormatsIfDue:(OSType)src target:(OSType)tgt {
+    NSDate *now = [NSDate date];
+    if (!_pixelLogStart) { _pixelLogStart = now; return; }
+    if ([now timeIntervalSinceDate:_pixelLogStart] < 1.0) return;
+    _pixelLogStart = now;
+    NSLog(@"[CBV2] pixel source=%s target=%s",
+          [self fourCC:src].UTF8String, [self fourCC:tgt].UTF8String);
 }
 
 - (void)replaceCached:(CVPixelBufferRef)buf pts:(CMTime)pts {

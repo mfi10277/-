@@ -87,8 +87,9 @@
         }
         NSString *aspect = s.aspectMode == 0 ? @"Fill" : (s.aspectMode == 1 ? @"Fit" : @"Stretch");
         NSString *message = [NSString stringWithFormat:
-                             @"状态：%@\n直播源：%@\n画面：%@\n镜像：%@\n旋转：%ld°",
+                             @"状态：%@\n源状态：%@\n直播源：%@\n画面：%@\n镜像：%@\n旋转：%ld°",
                              status,
+                             [CBStreamManager sourceState],
                              s.streamURL.length ? s.streamURL : @"未设置",
                              aspect,
                              s.mirror ? @"开" : @"关",

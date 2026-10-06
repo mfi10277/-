@@ -14,6 +14,8 @@
     NSMutableArray<CBFrameItem *> *_items;
     dispatch_queue_t _lock;
     NSUInteger _maxCount;
+    NSDate *_logStart;
+    NSUInteger _pushedWindow;
 }
 
 - (instancetype)init {
@@ -41,7 +43,19 @@
         while (_items.count > _maxCount) {
             [_items removeObjectAtIndex:0];
         }
+        [self logPushIfDue];
     });
+}
+
+- (void)logPushIfDue {
+    _pushedWindow++;
+    NSDate *now = [NSDate date];
+    if (!_logStart) { _logStart = now; return; }
+    if ([now timeIntervalSinceDate:_logStart] < 1.0) return;
+    _logStart = now;
+    NSLog(@"[CBV2] frame queued=%lu frame queue size=%lu",
+          (unsigned long)_pushedWindow, (unsigned long)_items.count);
+    _pushedWindow = 0;
 }
 
 - (CVPixelBufferRef)copyLatestForTargetSize:(CGSize)size pts:(CMTime *)pts {

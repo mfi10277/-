@@ -7,7 +7,9 @@ CMSampleBufferRef CBCreateSampleBufferLike(CMSampleBufferRef original, CVPixelBu
     if (!original || !image) return NULL;
 
     CMVideoFormatDescriptionRef fmt = NULL;
-    if (CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, image, &fmt) != noErr) {
+    OSStatus st = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, image, &fmt);
+    if (st != noErr) {
+        NSLog(@"[CBV2] error: format description failed status=%d", (int)st);
         return NULL;
     }
 
@@ -24,7 +26,12 @@ CMSampleBufferRef CBCreateSampleBufferLike(CMSampleBufferRef original, CVPixelBu
     if (!CMTIME_IS_NUMERIC(timing.decodeTimeStamp)) timing.decodeTimeStamp = kCMTimeInvalid;
 
     CMSampleBufferRef out = NULL;
-    CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, image, fmt, &timing, &out);
+    st = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, image, fmt, &timing, &out);
     CFRelease(fmt);
+    if (st != noErr || !out) {
+        NSLog(@"[CBV2] error: sample buffer create failed status=%d", (int)st);
+        if (out) { CFRelease(out); out = NULL; }
+        return NULL;
+    }
     return out;
 }

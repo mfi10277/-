@@ -1,5 +1,6 @@
 #import "CBHTTPFLVSource.h"
 #import "CBH264Decoder.h"
+#import "CBStreamManager.h"
 
 typedef NS_ENUM(NSUInteger, CBFLVParseState) {
     CBFLVParseStateWaitHeader = 0,      // expecting 9-byte FLV header
@@ -37,9 +38,12 @@ typedef NS_ENUM(NSUInteger, CBFLVParseState) {
 @property(nonatomic) uint64_t videoTags;
 @property(nonatomic) uint64_t audioTags;         // skipped in v1, counted only
 @property(nonatomic) uint64_t skippedAudioBytes;
+@property(nonatomic) uint64_t receivedBytes;     // raw bytes from the network
 
 @property(nonatomic) CMTime lastEmittedPTS;
 @property(nonatomic) BOOL lastEmittedPTSValid;
+
+@property(nonatomic) NSDate *statsWindowStart;
 @end
 
 @implementation CBHTTPFLVSource
@@ -55,6 +59,16 @@ typedef NS_ENUM(NSUInteger, CBFLVParseState) {
         _stopped = YES;
         _reconnectDelay = 2.0;
         _lastEmittedPTSValid = NO;
+
+        // Decode callback drives emission directly: as soon as VideoToolbox
+        // produces a frame for an access unit it is pushed downstream — no
+        // waiting for the next tag and no stale-latest-frame grabs.
+        __weak __typeof__(self) weakSelf = self;
+        _decoder.onFrameDecoded = ^(CVPixelBufferRef buf, CMTime pts) {
+            __strong __typeof__(weakSelf) self = weakSelf;
+            if (!self) return;
+            [self emitDecodedFrame:buf pts:pts];
+        };
     }
     return self;
 }
@@ -85,7 +99,11 @@ typedef NS_ENUM(NSUInteger, CBFLVParseState) {
     [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
     _task = [_session dataTaskWithRequest:req];
     [_task resume];
-    NSLog(@"[CBV2] HTTP-FLV connecting: %@", _url.absoluteString);
+    NSLog(@"[CBV2] HTTP-FLV start: %@", _url.absoluteString);
+    [CBStreamManager updateSourceState:@"CONNECTING"];
+    if ([_url.scheme isEqualToString:@"http"]) {
+        NSLog(@"[CBV2] WARNING plain HTTP source — TikTok ATS may block it unless NSAllowsArbitraryLoads (or a per-domain exception) is set");
+    }
 }
 
 - (void)stop {
@@ -107,6 +125,8 @@ typedef NS_ENUM(NSUInteger, CBFLVParseState) {
     _videoTags = 0;
     _audioTags = 0;
     _skippedAudioBytes = 0;
+    _receivedBytes = 0;
+    _statsWindowStart = nil;
     _lastEmittedPTSValid = NO;
     [_decoder reset];
     NSLog(@"[CBV2] decoder reset");
@@ -192,8 +212,10 @@ static inline int32_t CBReadS24BE(const uint8_t *p) {
     [_decoder reset];
     [_decoder pushNALU:sps pts:kCMTimeZero isKeyFrame:YES];
     [_decoder pushNALU:pps pts:kCMTimeZero isKeyFrame:YES];
-    NSLog(@"[CBV2] AVC config parsed (sps=%lu pps=%lu nalLength=%lu)",
-          (unsigned long)sps.length, (unsigned long)pps.length, (unsigned long)self.decoder.nalLengthSize);
+    [CBStreamManager updateSourceState:@"DECODING"];
+    NSLog(@"[CBV2] AVC config parsed sps=%lu pps=%lu naluLengthSize=%lu profile=%u level=%u",
+          (unsigned long)sps.length, (unsigned long)pps.length,
+          (unsigned long)self.decoder.nalLengthSize, p[1], p[3]);
     NSLog(@"[CBV2] SPS received");
     NSLog(@"[CBV2] PPS received");
     return YES;
@@ -201,22 +223,13 @@ static inline int32_t CBReadS24BE(const uint8_t *p) {
 
 #pragma mark - Frame emission
 
-- (void)emitDecodedFrameWithFallbackPTS:(CMTime)pts {
-    CMTime decodedPTS = kCMTimeInvalid;
-    CVPixelBufferRef frame = [_decoder copyLatestFrameWithPTS:&decodedPTS];
+/// Called from the VideoToolbox decode callback — a decoded frame is ready.
+- (void)emitDecodedFrame:(CVPixelBufferRef)frame pts:(CMTime)pts {
     if (!frame) return;
-    if (!CMTIME_IS_NUMERIC(decodedPTS)) decodedPTS = pts;
-
-    // Dedupe: only forward when the decoder actually produced a newer frame.
-    if (_lastEmittedPTSValid && CMTimeCompare(decodedPTS, _lastEmittedPTS) == 0) {
-        CVPixelBufferRelease(frame);
-        return;
-    }
-    _lastEmittedPTS = decodedPTS;
+    if (_lastEmittedPTSValid && CMTimeCompare(pts, _lastEmittedPTS) == 0) return; // dedupe
+    _lastEmittedPTS = pts;
     _lastEmittedPTSValid = YES;
-
-    if (_frameBlock) _frameBlock(frame, decodedPTS);
-    CVPixelBufferRelease(frame);
+    if (_frameBlock) _frameBlock(frame, pts);
 }
 
 - (void)parseVideoTag:(const uint8_t *)payload length:(NSUInteger)len timestampMS:(uint32_t)timestampMs {
@@ -242,8 +255,12 @@ static inline int32_t CBReadS24BE(const uint8_t *p) {
     const uint8_t *p = payload + 5;
     NSUInteger remain = len - 5;
     BOOL keyFrame = (frameType == 1);
-    BOOL emitted = NO;
 
+    // Collect EVERY NALU of this access unit into ONE AVCC sample, then submit
+    // the whole AU to VideoToolbox. Multi-slice / SEI + slice frames must never
+    // be split into separate decodes.
+    NSMutableData *au = [NSMutableData data];
+    BOOL hasVCL = NO;
     while (remain >= nls) {
         uint32_t naluLen = 0;
         for (NSUInteger i = 0; i < nls; i++) naluLen = (naluLen << 8) | p[i];
@@ -254,16 +271,32 @@ static inline int32_t CBReadS24BE(const uint8_t *p) {
             NSLog(@"[CBV2] error: truncated NALU in video tag (len=%u remain=%lu)", naluLen, (unsigned long)remain);
             break;
         }
-        NSData *nalu = [NSData dataWithBytes:p length:naluLen];
-        uint8_t naluType = ((const uint8_t *)nalu.bytes)[0] & 0x1F;
-        BOOL accepted = [_decoder pushNALU:nalu pts:pts isKeyFrame:keyFrame];
+        const uint8_t *nalu = p;
+        uint8_t naluType = nalu[0] & 0x1F;
+
+        if (naluType == 7 || naluType == 8) {
+            // SPS/PPS configure the decoder session and are NOT part of the frame sample.
+            NSData *cfg = [NSData dataWithBytes:nalu length:naluLen];
+            [_decoder pushNALU:cfg pts:pts isKeyFrame:keyFrame];
+        } else if (naluType >= 1 && naluType <= 5) {
+            hasVCL = YES;
+        }
+
+        // AVCC length prefix (nalLengthSize bytes) + NALU, appended in order.
+        uint8_t nb[4] = {0, 0, 0, 0};
+        for (NSUInteger i = 0; i < nls; i++) nb[nls - 1 - i] = (naluLen >> (8 * i)) & 0xFF;
+        [au appendBytes:nb length:nls];
+        [au appendBytes:nalu length:naluLen];
+
         p += naluLen;
         remain -= naluLen;
+    }
 
-        // Emit at most once per access unit, and only after a VCL NALU was pushed.
-        if (!emitted && naluType >= 1 && naluType <= 5 && accepted) {
-            emitted = YES;
-            [self emitDecodedFrameWithFallbackPTS:pts];
+    if (hasVCL && au.length) {
+        [CBStreamManager updateSourceState:@"DECODING"];
+        BOOL accepted = [_decoder decodeAccessUnit:au pts:pts isKeyFrame:keyFrame];
+        if (!accepted) {
+            NSLog(@"[CBV2] WARNING: access unit rejected by decoder (pts=%.1fms)", CMTimeGetSeconds(pts) * 1000.0);
         }
     }
 }
@@ -281,6 +314,8 @@ static inline int32_t CBReadS24BE(const uint8_t *p) {
                 if (len - _cursor < 9) return;
                 const uint8_t *p = bytes + _cursor;
                 if (memcmp(p, "FLV", 3) != 0 || p[3] != 1) {
+                    NSLog(@"[CBV2] invalid FLV header (sig=%c%c%c ver=%u)",
+                          p[0], p[1], p[2], p[3]);
                     [self failWithReason:@"bad FLV signature"];
                     return;
                 }
@@ -293,7 +328,8 @@ static inline int32_t CBReadS24BE(const uint8_t *p) {
                 _cursor += 9;
                 _state = CBFLVParseStateReadPrevTagSize;
                 progress = YES;
-                NSLog(@"[CBV2] FLV header parsed (dataOffset=%u)", offset);
+                NSLog(@"[CBV2] FLV header parsed version=%u flags=0x%02X dataOffset=%u",
+                      p[3], p[4], offset);
                 break;
             }
             case CBFLVParseStateReadPrevTagSize: {
@@ -370,14 +406,22 @@ didReceiveResponse:(NSURLResponse *)response
  completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler {
     if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
         NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+        NSDictionary *h = http.allHeaderFields;
+        NSLog(@"[CBV2] HTTP-FLV response status=%ld content-type=%@ content-length=%@ url=%@",
+              (long)http.statusCode,
+              [h[@"Content-Type"] description] ?: @"(none)",
+              [h[@"Content-Length"] description] ?: @"(unknown)",
+              http.URL.absoluteString);
         if (http.statusCode != 200) {
+            NSLog(@"[CBV2] HTTP-FLV HTTP error status=%ld", (long)http.statusCode);
+            [CBStreamManager updateSourceState:@"ERROR"];
             // Cancel triggers didCompleteWithError:, which schedules the reconnect once.
-            NSLog(@"[CBV2] error: HTTP-FLV bad status %ld", (long)http.statusCode);
             completionHandler(NSURLSessionResponseCancel);
             return;
         }
     }
     NSLog(@"[CBV2] HTTP-FLV connected");
+    [CBStreamManager updateSourceState:@"CONNECTED"];
     _reconnectCount = 0;
     completionHandler(NSURLSessionResponseAllow);
 }
@@ -387,11 +431,28 @@ didReceiveResponse:(NSURLResponse *)response
   didReceiveData:(NSData *)data {
     if (!data.length) return;
     [_buffer appendData:data];
+    _receivedBytes += data.length;
     if (_buffer.length > 48 * 1024 * 1024) {
         [self failWithReason:@"buffer overflow (48MB cap)"];
         return;
     }
     [self parseAvailableFLV];
+    [self logFLVStatsIfDue];
+}
+
+- (void)logFLVStatsIfDue {
+    NSDate *now = [NSDate date];
+    if (!_statsWindowStart) { _statsWindowStart = now; return; }
+    NSTimeInterval dt = [now timeIntervalSinceDate:_statsWindowStart];
+    if (dt < 1.0) return;
+    _statsWindowStart = now;
+    NSLog(@"[CBV2] HTTP-FLV received bytes=%llu flv bytes=%llu videoTags=%llu audioTags=%llu",
+          (unsigned long long)_receivedBytes, (unsigned long long)_receivedBytes,
+          (unsigned long long)_videoTags, (unsigned long long)_audioTags);
+    if (_videoTags == 0 && _dataOffset > 0) {
+        NSLog(@"[CBV2] WARNING: no video tags received — source is not an AVC/H.264 video FLV");
+        [CBStreamManager updateSourceState:@"NO_VIDEO"];
+    }
 }
 
 - (void)URLSession:(NSURLSession *)s
@@ -402,7 +463,9 @@ didCompleteWithError:(NSError *)error {
     _session = nil;
     if (_stopped) return;
     if (error) {
-        NSLog(@"[CBV2] HTTP-FLV stream ended: %@", error.localizedDescription);
+        NSLog(@"[CBV2] stream error domain=%@ code=%ld localized=%@",
+              error.domain, (long)error.code, error.localizedDescription);
+        [CBStreamManager updateSourceState:@"ERROR"];
     } else {
         NSLog(@"[CBV2] HTTP-FLV stream ended (EOF)");
     }

@@ -11,6 +11,8 @@
 @property(nonatomic) uint32_t pendingCount;   // frames submitted, not yet decoded
 @property(nonatomic) uint32_t decodedCount;
 @property(nonatomic) uint32_t droppedCount;
+@property(nonatomic) NSDate *fpsWindowStart;
+@property(nonatomic) NSUInteger fpsWindowCount;
 @end
 
 @implementation CBH264Decoder
@@ -44,7 +46,24 @@ static void CBDecodeCallback(void *decompressionOutputRefCon,
         self.latestPTS = presentationTimeStamp;
         if (self.pendingCount > 0) self.pendingCount--;
         self.decodedCount++;
+        [self logDecodedFPSIfDue];
     }
+    if (self.onFrameDecoded) {
+        self.onFrameDecoded((CVPixelBufferRef)imageBuffer, presentationTimeStamp);
+    }
+}
+
+#pragma mark - Decode FPS (1 s cadence, not per frame)
+
+- (void)logDecodedFPSIfDue {
+    NSDate *now = [NSDate date];
+    if (!_fpsWindowStart) { _fpsWindowStart = now; _fpsWindowCount = 0; return; }
+    NSTimeInterval dt = [now timeIntervalSinceDate:_fpsWindowStart];
+    if (dt < 1.0) return;
+    CGFloat fps = (CGFloat)_fpsWindowCount / MAX(dt, 0.001);
+    NSLog(@"[CBV2] decoded fps=%.1f", fps);
+    _fpsWindowStart = now;
+    _fpsWindowCount = 0;
 }
 
 #pragma mark - Session lifecycle
@@ -118,12 +137,8 @@ static BOOL CBAnnexBStartCodeLen(const uint8_t *p, NSUInteger len, NSUInteger *c
 
     if (!_session) return NO;
 
-    @synchronized (self) {
-        if (_pendingCount >= 12) { _droppedCount++; return YES; } // decoder too far behind
-        _pendingCount++;
-    }
-
-    // Frame NALU as AVCC: length field (nalLengthSize bytes) + NALU.
+    // Single-NALU AVCC sample (kept for compatibility; the FLV pipeline now uses
+    // decodeAccessUnit: so multi-NALU access units are submitted atomically).
     NSUInteger nls = MAX(1u, MIN(_nalLengthSize, 4u));
     NSMutableData *avcc = [NSMutableData dataWithLength:nls + len];
     uint8_t *dst = (uint8_t *)avcc.mutableBytes;
@@ -133,14 +148,32 @@ static BOOL CBAnnexBStartCodeLen(const uint8_t *p, NSUInteger len, NSUInteger *c
         be >>= 8;
     }
     memcpy(dst + nls, bytes, len);
+    return [self submitAVCCSample:avcc pts:pts];
+}
+
+- (BOOL)decodeAccessUnit:(NSData *)avccSample pts:(CMTime)pts isKeyFrame:(BOOL)keyFrame {
+    if (!avccSample.length || !_session) return NO;
+    return [self submitAVCCSample:avccSample pts:pts];
+}
+
+/// Submit one complete AVCC sample (length prefixes + NALUs) to VideoToolbox.
+- (BOOL)submitAVCCSample:(NSData *)avcc pts:(CMTime)pts {
+    NSUInteger nls = MAX(1u, MIN(_nalLengthSize, 4u));
+    NSUInteger sampleLen = avcc.length;
+    if (sampleLen < nls) return NO;
+
+    @synchronized (self) {
+        if (_pendingCount >= 12) { _droppedCount++; return YES; } // decoder too far behind
+        _pendingCount++;
+    }
 
     // Owned block buffer: allocator copies the payload so the async decode never
     // touches freed stack/heap memory after we return.
     CMBlockBufferRef bb = NULL;
-    OSStatus st = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, avcc.length,
+    OSStatus st = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, sampleLen,
                                                      kCFAllocatorDefault, NULL, 0, 0, 0, &bb);
     if (st != kCMBlockBufferNoErr) { @synchronized (self) { _pendingCount--; } return NO; }
-    st = CMBlockBufferReplaceDataBytes(avcc.bytes, bb, 0, avcc.length);
+    st = CMBlockBufferReplaceDataBytes(avcc.bytes, bb, 0, sampleLen);
     if (st != kCMBlockBufferNoErr) {
         CFRelease(bb);
         @synchronized (self) { _pendingCount--; }
@@ -152,7 +185,7 @@ static BOOL CBAnnexBStartCodeLen(const uint8_t *p, NSUInteger len, NSUInteger *c
     CMVideoFormatDescriptionRef f = _format;
     if (bb && f) {
         CMSampleTimingInfo ti = { dur, pts, kCMTimeInvalid };
-        size_t size = avcc.length;
+        size_t size = sampleLen;
         CMSampleBufferCreateReady(kCFAllocatorDefault, bb, f, 1, 1, &ti, 1, &size, &sb);
     }
     CFRelease(bb);
@@ -161,9 +194,13 @@ static BOOL CBAnnexBStartCodeLen(const uint8_t *p, NSUInteger len, NSUInteger *c
     VTDecodeFrameFlags flags = kVTDecodeFrame_EnableAsynchronousDecompression;
     st = VTDecompressionSessionDecodeFrame(_session, sb, flags, NULL, NULL);
     CFRelease(sb);
-    if (st == noErr) return YES;                 // async callback will decrement pendingCount
+    if (st == noErr) {
+        @synchronized (self) { _fpsWindowCount++; }
+        return YES; // async callback will decrement pendingCount
+    }
     @synchronized (self) { _pendingCount--; }    // failed/bad-data frames never call back
     if (st == kVTVideoDecoderBadDataErr) return YES;
+    NSLog(@"[CBV2] error: VTDecompressionSessionDecodeFrame failed status=%d", (int)st);
     return NO;
 }
 
@@ -189,6 +226,8 @@ static BOOL CBAnnexBStartCodeLen(const uint8_t *p, NSUInteger len, NSUInteger *c
         _pps = nil;
         _pendingCount = 0;
         _latestPTS = kCMTimeInvalid;
+        _fpsWindowStart = nil;
+        _fpsWindowCount = 0;
     }
 }
 
