@@ -27,7 +27,7 @@ jobs:
           theos-src: waruhachi/theos
           theos-branch: main
           sdks-src: waruhachi/sdks
-          sdks-branch: master
+          sdks-branch: main
 
       - name: Show toolchain
         run: |
