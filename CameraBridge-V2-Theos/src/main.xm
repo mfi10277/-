@@ -4,6 +4,7 @@
 #import "CBCameraProxy.h"
 #import "CBControlPanel.h"
 #import "CBSettings.h"
+#import "CBStreamManager.h"
 
 static const void *kCBProxyKey = &kCBProxyKey;
 
