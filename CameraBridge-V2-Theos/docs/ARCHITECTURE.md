@@ -92,8 +92,17 @@ FLV Tag (type 9)
 | `CBV2.Mirror` | horizontal mirror | NO |
 | `CBV2.Rotation` | 0/90/180/270 | 0 |
 | `CBV2.AspectMode` | 0=Fill, 1=Fit, 2=Stretch | 0 |
+| `CBV2.AutoStart` | auto-start stream on plugin load | YES |
 
 Loaded at startup, saved on every change, invalid URLs are ignored (no crash).
+
+## Control panel
+
+- Shown on **every** plugin load (after ~2 s), independent of `StreamURL` / `Enabled` / `AutoStart`.
+- `CBControlPanel.presenting` + `currentAlert` guard: at most one panel at a time; `panelDidDismiss` clears the state so the next `show` always works.
+- Shows persisted state (enabled/URL/画面/镜像/旋转); text field pre-filled with the current URL.
+- Actions: 保存并启用 (save + enable + restart; empty URL → hint, no start), 停用 (enabled=NO + stop, real camera feed restored), 刷新直播源 (stop → clear queue → restart), 画面设置, 取消.
+- AutoStart: `autoStart && enabled && URL non-empty` → `CBStreamManager startIfNeeded` at load; otherwise no auto-start but panel still appears.
 
 ## Log contract
 
@@ -102,12 +111,15 @@ Important milestones are logged once (not per frame):
 ```text
 [CBV2] injected
 [CBV2] camera delegate hooked
+[CBV2] settings loaded / settings saved / enabled = YES|NO
+[CBV2] control panel show / control panel dismissed
+[CBV2] autostart = YES|NO
 [CBV2] stream starting
 [CBV2] HLS started / HTTP-FLV connected
 [CBV2] FLV header parsed
 [CBV2] AVC config parsed / SPS received / PPS received
 [CBV2] H264 decoder ready
-[CBV2] stream stopped / decoder reset / error ...
+[CBV2] stream stopped / stream restart / decoder reset / error ...
 [CBV2] source=flv fps=29.8 decoded=30 injected=30     (1 s cadence)
 ```
 
