@@ -75,17 +75,23 @@ Windows cannot build iOS binaries — use the GitHub Action or a macOS machine.
 
 1. Build or download `CameraBridgeV2.dylib` (arm64 for iPhone 11).
 2. Open **TrollFools**, select **TikTok** (`com.zhiliaoapp.musically`), inject the dylib.
-3. Relaunch TikTok. After 2 s, if no URL is configured, the CameraBridge panel appears.
-4. Enter your stream URL (`https://host/live.m3u8` or `http://host/live.flv`), tap **启用**.
+3. Relaunch TikTok. After 2 s the CameraBridge panel appears **on every launch** (independent of whether a URL is already configured).
+4. The text field is pre-filled with the current URL. Enter your stream URL (`https://host/live.m3u8` or `http://host/live.flv`) and tap **保存并启用**.
 
 Controls available from the panel:
 
 | Control | Behavior |
 |---|---|
-| 启用 / 停用 | start / stop replacement; 停用 restores the real camera feed |
-| 镜像 | toggle horizontal mirror |
-| 旋转 | 0 / 90 / 180 / 270 |
-| 比例 | Fill (crop) / Fit (letterbox) / Stretch |
+| 保存并启用 | save URL, enable replacement, (re)start the stream; empty URL shows a hint instead of starting |
+| 停用 | stop replacement and restore the real camera feed (enabled=NO, persisted) |
+| 刷新直播源 | stop → clear frame queue → re-read URL → restart the stream (manual reconnect) |
+| 画面设置 | 镜像 / 旋转 / 比例 sub-panel |
+| 取消 | dismiss |
+
+Panel behavior:
+
+- Shows current state from persisted settings: `● 已启用 / ○ 已停用 / ○ 未配置`, stream URL, 画面 (Fill/Fit/Stretch), 镜像, 旋转.
+- `CBV2.AutoStart` (default YES): when YES and enabled and a URL is set, the stream starts automatically on plugin load; when NO the stream is not auto-started but the panel still appears.
 
 Settings are persisted via `NSUserDefaults`:
 
@@ -94,6 +100,7 @@ Settings are persisted via `NSUserDefaults`:
 - `CBV2.Mirror`
 - `CBV2.Rotation`
 - `CBV2.AspectMode` (0=Fill, 1=Fit, 2=Stretch)
+- `CBV2.AutoStart` (default YES)
 
 ## Stream notes
 
