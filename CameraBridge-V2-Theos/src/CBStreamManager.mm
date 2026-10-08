@@ -111,7 +111,8 @@ static os_unfair_lock s_stateLock = OS_UNFAIR_LOCK_INIT;
         }
         [_source start];
     });
-    NSLog(@"[CBV2] stream starting: %@", u);
+    // The URL may contain a signed query token; log only non-secret endpoint data.
+    NSLog(@"[CBV2] stream starting: scheme=%@ host=%@", url.scheme ?: @"?", url.host ?: @"?");
 }
 
 - (void)stop {

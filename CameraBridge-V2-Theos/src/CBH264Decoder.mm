@@ -39,15 +39,16 @@ static void CBDecodeCallback(void *decompressionOutputRefCon,
                              CMTime presentationTimeStamp,
                              CMTime presentationDuration) {
     CBH264Decoder *self = (__bridge CBH264Decoder *)decompressionOutputRefCon;
-    if (status != noErr || !imageBuffer) return;
+    BOOL success = (status == noErr && imageBuffer != NULL);
     @synchronized (self) {
-        if (self.latest) CVPixelBufferRelease(self.latest);
-        self.latest = (CVPixelBufferRef)CFRetain(imageBuffer);
-        self.latestPTS = presentationTimeStamp;
+        if (success && self.latest) CVPixelBufferRelease(self.latest);
+        if (success) self.latest = (CVPixelBufferRef)CFRetain(imageBuffer);
+        if (success) self.latestPTS = presentationTimeStamp;
         if (self.pendingCount > 0) self.pendingCount--;
-        self.decodedCount++;
-        [self logDecodedFPSIfDue];
+        if (success) self.decodedCount++;
+        if (success) [self logDecodedFPSIfDue];
     }
+    if (!success) return;
     if (self.onFrameDecoded) {
         self.onFrameDecoded((CVPixelBufferRef)imageBuffer, presentationTimeStamp);
     }

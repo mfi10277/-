@@ -50,13 +50,13 @@ static const void *kCBProxyKey = &kCBProxyKey;
     @autoreleasepool {
         CBSettings *settings = [CBSettings shared]; // load + [CBV2] settings loaded
         NSLog(@"[CBV2] injected");
-        NSLog(@"[CBV2] configured: enabled=%d autostart=%d mirror=%d rotation=%ld aspect=%ld url=%@",
+        NSLog(@"[CBV2] configured: enabled=%d autostart=%d mirror=%d rotation=%ld aspect=%ld urlConfigured=%d",
               settings.enabled,
               settings.autoStart,
               settings.mirror,
               (long)settings.rotation,
               (long)settings.aspectMode,
-              settings.streamURL);
+              settings.streamURL.length > 0);
         // AutoStart: AutoStart && Enabled && URL present -> start the network stream.
         if (settings.autoStart && settings.enabled && settings.streamURL.length > 0) {
             NSLog(@"[CBV2] autostart = YES");

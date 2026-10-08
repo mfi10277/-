@@ -10,6 +10,11 @@ typedef NS_ENUM(NSUInteger, CBFLVParseState) {
     CBFLVParseStateProcessTag,          // dispatch tag
 };
 
+// Stream URLs may contain bearer tokens; log only the non-secret origin.
+static NSString *CBURLLabel(NSURL *url) {
+    if (!url.host.length) return @"(no host)";
+    return [NSString stringWithFormat:@"%@://%@", url.scheme ?: @"?", url.host];
+}
 /// A network chunk does NOT map 1:1 to an FLV tag. We accumulate bytes into
 /// _buffer and only advance _cursor past complete tags; an incomplete tag simply
 /// waits for the next didReceiveData: batch.
@@ -99,7 +104,7 @@ typedef NS_ENUM(NSUInteger, CBFLVParseState) {
     [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
     _task = [_session dataTaskWithRequest:req];
     [_task resume];
-    NSLog(@"[CBV2] HTTP-FLV start: %@", _url.absoluteString);
+    NSLog(@"[CBV2] HTTP-FLV start: %@", CBURLLabel(_url));
     [CBStreamManager updateSourceState:@"CONNECTING"];
     if ([_url.scheme isEqualToString:@"http"]) {
         NSLog(@"[CBV2] WARNING plain HTTP source — TikTok ATS may block it unless NSAllowsArbitraryLoads (or a per-domain exception) is set");
@@ -308,6 +313,8 @@ static inline int32_t CBReadS24BE(const uint8_t *p) {
     NSUInteger len = _buffer.length;
     BOOL progress = YES;
     while (progress) {
+        // Wait safely for extended-header bytes before subtracting cursor from len.
+        if (_cursor > len) return;
         progress = NO;
         switch (_state) {
             case CBFLVParseStateWaitHeader: {
@@ -325,7 +332,8 @@ static inline int32_t CBReadS24BE(const uint8_t *p) {
                     return;
                 }
                 _dataOffset = offset;
-                _cursor += 9;
+                // DataOffset may point past an extended FLV header.
+                _cursor = offset;
                 _state = CBFLVParseStateReadPrevTagSize;
                 progress = YES;
                 NSLog(@"[CBV2] FLV header parsed version=%u flags=0x%02X dataOffset=%u",
@@ -411,7 +419,7 @@ didReceiveResponse:(NSURLResponse *)response
               (long)http.statusCode,
               [h[@"Content-Type"] description] ?: @"(none)",
               [h[@"Content-Length"] description] ?: @"(unknown)",
-              http.URL.absoluteString);
+              CBURLLabel(http.URL));
         if (http.statusCode != 200) {
             NSLog(@"[CBV2] HTTP-FLV HTTP error status=%ld", (long)http.statusCode);
             [CBStreamManager updateSourceState:@"ERROR"];

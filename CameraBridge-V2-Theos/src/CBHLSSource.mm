@@ -1,5 +1,11 @@
 #import "CBHLSSource.h"
 
+// HLS URLs can carry signed query parameters; do not expose them in syslog.
+static NSString *CBURLLabel(NSURL *url) {
+    if (!url.host.length) return @"(no host)";
+    return [NSString stringWithFormat:@"%@://%@", url.scheme ?: @"?", url.host];
+}
+
 @interface CBHLSSource ()
 @property(nonatomic) NSURL *url;
 @property(nonatomic) AVPlayer *player;
@@ -102,7 +108,7 @@
 
 - (void)startPlayer {
     if (_player) [_player play];
-    NSLog(@"[CBV2] HLS started: %@", _url.absoluteString);
+    NSLog(@"[CBV2] HLS started: %@", CBURLLabel(_url));
 }
 
 - (void)stop {
